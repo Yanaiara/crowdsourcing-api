@@ -1,5 +1,6 @@
 const db = require("../config/firebase");
 const localSchema = require("../validation/locais");
+const redisClient = require("../config/redis.config");
 
 // Adicionar um novo local
 exports.adicionarLocal = async (req, res) => {
@@ -13,6 +14,7 @@ exports.adicionarLocal = async (req, res) => {
     const ref = db.ref("locais");
     const novoLocalRef = ref.push();
     await novoLocalRef.set(novoLocal);
+    await redisClient.del("locais_cache");
 
     res.status(201).send({
       message: "Local adicionado com sucesso!",
@@ -20,6 +22,7 @@ exports.adicionarLocal = async (req, res) => {
       local: novoLocal,
     });
   } catch (error) {
+    console.error("Erro ao adicionar local:", error.message);
     res
       .status(500)
       .send({ error: `Erro ao adicionar local: ${error.message}` });
@@ -28,7 +31,34 @@ exports.adicionarLocal = async (req, res) => {
 
 // Listar todos os locais
 exports.listarLocais = async (req, res) => {
+  const cacheKey = "locais_cache";
+
   try {
+    if (!redisClient.isOpen) {
+      await redisClient.connect();
+    }
+
+    const cachedData = await redisClient.get(cacheKey);
+
+    if (cachedData) {
+      console.log("Dados retornados do cache");
+
+      try {
+        const locais = JSON.parse(cachedData);
+        return res.status(200).send({ locais });
+      } catch (parseError) {
+        console.error(
+          "Erro ao fazer o parse do cache Redis:",
+          parseError.message
+        );
+        return res
+          .status(500)
+          .send({
+            error: `Erro ao fazer o parse do cache: ${parseError.message}`,
+          });
+      }
+    }
+
     const ref = db.ref("locais");
     const snapshot = await ref.once("value");
     const locaisData = snapshot.val();
@@ -38,13 +68,17 @@ exports.listarLocais = async (req, res) => {
     }
 
     const locais = Object.keys(locaisData).map((id) => ({
-      id: id,
+      id,
       ...locaisData[id],
     }));
 
-    res.status(200).send({ locais });
+    await redisClient.setEx(cacheKey, 3600, JSON.stringify(locais));
+    console.log("Dados armazenados no cache");
+
+    return res.status(200).send({ locais });
   } catch (error) {
-    res
+    console.error("Erro ao recuperar locais:", error.message);
+    return res
       .status(500)
       .send({ error: `Erro ao recuperar locais: ${error.message}` });
   }
@@ -56,16 +90,9 @@ exports.atualizarLocal = async (req, res) => {
     const localId = req.params.id;
     const novoDadosLocal = req.body;
 
-    if (
-      !novoDadosLocal ||
-      !novoDadosLocal.name ||
-      !novoDadosLocal.address ||
-      !Array.isArray(novoDadosLocal.features) ||
-      typeof novoDadosLocal.rating !== "number"
-    ) {
-      return res
-        .status(400)
-        .send({ error: "Dados do local incompletos ou inválidos!" });
+    const { error } = localSchema.validate(novoDadosLocal);
+    if (error) {
+      return res.status(400).send({ error: error.details[0].message });
     }
 
     const ref = db.ref(`locais/${localId}`);
@@ -76,6 +103,7 @@ exports.atualizarLocal = async (req, res) => {
     }
 
     await ref.update(novoDadosLocal);
+    await redisClient.del("locais_cache");
 
     res.status(200).send({
       message: "Local atualizado com sucesso!",
@@ -83,6 +111,7 @@ exports.atualizarLocal = async (req, res) => {
       local: novoDadosLocal,
     });
   } catch (error) {
+    console.error("Erro ao atualizar local:", error.message);
     res
       .status(500)
       .send({ error: `Erro ao atualizar local: ${error.message}` });
@@ -102,10 +131,13 @@ exports.removerLocal = async (req, res) => {
     }
 
     await ref.remove();
+    await redisClient.del("locais_cache");
+
     res
       .status(200)
       .send({ message: "Local removido com sucesso!", id: localId });
   } catch (error) {
+    console.error("Erro ao remover local:", error.message);
     res.status(500).send({ error: `Erro ao remover local: ${error.message}` });
   }
 };
